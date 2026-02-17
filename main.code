@@ -1,0 +1,268 @@
+!pip install pytesseract opencv-python pillow pandas plotly
+!apt-get install -y tesseract-ocr
+!pip install pytesseract opencv-python pillow pandas plotly google-generativeai
+!apt-get install -y tesseract-ocr
+!pip install easyocr google-generativeai pandas matplotlib
+import cv2
+import numpy as np
+import google.generativeai as genai
+import pytesseract
+from PIL import Image
+import pandas as pd
+import re
+import plotly.graph_objects as go
+from google.colab import files
+from IPython.display import display, HTML
+uploaded = files.upload()
+image_path = list(uploaded.keys())[0]
+img = cv2.imread(image_path)
+
+# Resize
+img = cv2.resize(img, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
+
+# Enhance contrast using LAB
+lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+l, a, b = cv2.split(lab)
+
+clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+cl = clahe.apply(l)
+
+limg = cv2.merge((cl,a,b))
+enhanced = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+
+processed_path = "processed.png"
+cv2.imwrite(processed_path, enhanced)
+
+display(Image.open(processed_path))
+custom_config = r'--oem 3 --psm 6'
+text = pytesseract.image_to_string(Image.open(processed_path), config=custom_config)
+
+print(text)
+lines = [l.strip() for l in text.split("\n") if l.strip()]
+
+data = []
+
+for line in lines:
+    
+    # This regex finds:
+    # Test Name + Value + Range (even if units exist)
+    match = re.search(
+        r"([A-Za-z %()/]+)\s+(\d+\.?\d*)\s*(?:mg/dL|g/dL|%|)?\s*(\d+\.?\d*)\s*[-–]\s*(\d+\.?\d*)",
+        line
+    )
+    
+    if match:
+        test = match.group(1).strip()
+        value = float(match.group(2))
+        low = float(match.group(3))
+        high = float(match.group(4))
+        
+        data.append([test, value, low, high])
+
+df = pd.DataFrame(data, columns=["Test", "Value", "Low", "High"])
+
+df
+def analyze(row):
+    if row["Value"] < row["Low"]:
+        return "Low"
+    elif row["Value"] > row["High"]:
+        return "High"
+    else:
+        return "Normal"
+
+df["Status"] = df.apply(analyze, axis=1)
+
+df
+def get_simple_advice(status):
+    
+    if status == "High":
+        return (
+            "The value is above the normal range.",
+            [
+                "Avoid oily and processed foods",
+                "Reduce sugar and salt intake",
+                "Exercise at least 30 minutes daily",
+                "Drink enough water"
+            ]
+        )
+        
+    elif status == "Low":
+        return (
+            "The value is below the normal range.",
+            [
+                "Improve nutritional intake",
+                "Eat balanced meals regularly",
+                "Include fruits and vegetables",
+                "Consult doctor if symptoms persist"
+            ]
+        )
+        
+    else:
+        return (
+            "The value is within the normal healthy range.",
+            [
+                "Maintain balanced diet",
+                "Continue regular exercise",
+                "Stay hydrated",
+                "Do routine health checkups"
+            ]
+        )
+def get_advice(test_name, status):
+    
+    test_name_lower = test_name.lower()
+    
+    for category, info in medical_knowledge.items():
+        
+        if category == "default":
+            continue
+        
+        for keyword in info["keywords"]:
+            if keyword in test_name_lower:
+                
+                if status == "High":
+                    return info["high_risk"], info["high_control"]
+                elif status == "Low":
+                    return info["low_risk"], info["low_control"]
+    
+    if status == "High":
+        return medical_knowledge["default"]["high_risk"], medical_knowledge["default"]["high_control"]
+    elif status == "Low":
+        return medical_knowledge["default"]["low_risk"], medical_knowledge["default"]["low_control"]
+    
+    return None, None
+
+html_output = """
+<div style="background:#d9ecff;padding:40px;border-radius:15px;
+            font-family:Arial;color:#000000;">
+
+<h1 style="color:#00264d;font-weight:bold;text-align:center;">
+AI Medical Report Analysis
+</h1>
+"""
+
+for _, row in df.iterrows():
+
+    if row["Status"] == "High":
+        color = "#cc0000"
+    elif row["Status"] == "Low":
+        color = "#ff6600"
+    else:
+        color = "#009933"
+
+    explanation, tips = get_simple_advice(row["Status"])
+    tips_html = "<br>".join([f"• {tip}" for tip in tips])
+
+    html_output += f"""
+    <div style="background:white;padding:25px;margin-top:25px;
+                border-radius:12px;border-left:8px solid {color};
+                box-shadow:0px 4px 10px rgba(0,0,0,0.1);">
+
+        <h2 style="color:#003366;">{row['Test']}</h2>
+
+        <p style="font-size:18px;">
+        <b>Your Value:</b> {row['Value']} <br>
+        <b>Normal Range:</b> {row['Low']} - {row['High']} <br>
+        <b>Status:</b> <span style="color:{color};font-weight:bold;">
+        {row['Status']}
+        </span>
+        </p>
+
+        <p style="font-size:17px;">
+        <b>Analysis:</b> {explanation}
+        </p>
+
+        <p style="font-size:17px;">
+        <b>Health Tips:</b><br>
+        {tips_html}
+        </p>
+
+    </div>
+    """
+
+html_output += "</div>"
+
+display(HTML(html_output))
+report_text = ""
+
+for _, row in df.iterrows():
+    report_text += f"""
+Test Name: {row['Test']}
+Measured Value: {row['Value']}
+Normal Range: {row['Low']} - {row['High']}
+Status: {row['Status']}
+"""
+genai.configure(api_key="AIzaSyB0aQYeBIeBgKDNCEvCjyzqUHbHMMtcmOE")
+
+model = genai.GenerativeModel("models/gemini-2.5-flash")
+prompt = f"""
+You are a clinical medical analysis AI.
+
+Analyze the medical report below.
+
+For each test, respond strictly in this format:
+
+Test: <Test Name>
+Condition: <High / Low / Normal>
+Possible Cause: <1 short professional sentence>
+Recommendation: <How to reduce / increase / maintain level in 1-2 short lines>
+Risk Level: <Low / Moderate / High>
+
+Keep response:
+Short
+Professional
+Clear
+No bullet points
+No stars
+No long paragraphs
+No extra explanation
+
+Medical Report:
+{report_text}
+"""
+response = model.generate_content(prompt)
+ai_output = response.text
+print(ai_output)
+colors = []
+
+for s in df["Status"]:
+    if s == "High":
+        colors.append("red")
+    elif s == "Low":
+        colors.append("orange")
+    else:
+        colors.append("green")
+
+fig = go.Figure()
+
+fig.add_trace(go.Bar(
+    x=df["Test"],
+    y=df["Value"],
+    marker_color=colors
+))
+
+fig.update_layout(
+    title="Lab Test Overview",
+    xaxis_title="Tests",
+    yaxis_title="Values",
+    template="plotly_white"
+)
+
+fig.show()
+colors = ["green" if s=="Normal" else "red" for s in df["Status"]]
+
+fig = go.Figure()
+
+fig.add_trace(go.Bar(
+    x=df["Test"],
+    y=df["Value"],
+    marker_color=colors
+))
+
+fig.update_layout(
+    title="Lab Values Overview",
+    xaxis_title="Tests",
+    yaxis_title="Value",
+    template="plotly_white"
+)
+
+fig.show()
